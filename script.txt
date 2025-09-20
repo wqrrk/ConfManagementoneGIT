@@ -1,0 +1,5 @@
+# старт
+echo hello
+ls
+cd demo
+ls
