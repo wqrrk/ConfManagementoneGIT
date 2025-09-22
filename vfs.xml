@@ -1,1 +1,31 @@
-<root>  </root>
+<?xml version="1.0" encoding="UTF-8"?>
+<dir name="/">
+  <dir name="home">
+    <dir name="user">
+      <file name="readme.txt">Hello from XML VFS</file>
+      <dir name="projects">
+        <file name="todo.txt">- finish console
+- add cat command</file>
+        <file name="notes.md">Some markdown note</file>
+      </dir>
+    </dir>
+  </dir>
+
+  <dir name="etc">
+    <file name="hosts">127.0.0.1 localhost</file>
+    <file name="config.cfg">debug=true</file>
+  </dir>
+
+  <dir name="var">
+    <dir name="log">
+      <file name="sys.log">[INFO] System started</file>
+      <file name="error.log">[ERROR] Something went wrong</file>
+    </dir>
+  </dir>
+
+  <dir name="tmp">
+    <file name="scratch.txt">temporary data</file>
+  </dir>
+
+  <file name="motd">Welcome to the XML VFS demo</file>
+</dir>

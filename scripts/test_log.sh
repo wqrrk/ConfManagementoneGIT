@@ -1,2 +1,2 @@
 #!/bin/bash
-python3 main.py --log commands.xml
+python3 main.py --log commands.xml --script
