@@ -7,6 +7,20 @@ from datetime import datetime
 from xml.etree import ElementTree as ET
 import base64
 
+"""
+Stage 3 + Stage 4 + Stage 5:
+- CLI: --vfs <XML file>, --log <XML log>, --script <startup script>
+- In-memory VFS loaded from XML (no disk modification)
+- motd support (file "motd" in VFS root)
+- Commands Stage 3: ls, cd, cat, echo, exit
+- Commands Stage 4: uniq, tree
+- Commands Stage 5: mkdir, rm (все изменения только в памяти)
+- XML logging preserved (user, host, datetime, command, args, cwd, source)
+"""
+
+# -----------------
+# helpers
+# -----------------
 
 def get_username():
     return os.getenv("USER") or os.getenv("USERNAME") or "user"
@@ -48,6 +62,9 @@ def xml_log(p, user, host, cmd, args, cwd, source):
     except Exception:
         pass
 
+# -----------------
+# VFS helpers
+# -----------------
 
 def _vfs_dir():
     return {"type": "dir", "children": {}}
@@ -67,9 +84,10 @@ def load_vfs_from_xml(xml_path: Path | None):
             node = _vfs_dir()
             for ch in elem:
                 if ch.tag == "dir":
-                    node["children"][ch.get("name")] = build(ch)
+                    name = ch.get("name") or ""
+                    node["children"][name] = build(ch)
                 elif ch.tag == "file":
-                    name = ch.get("name")
+                    name = ch.get("name") or ""
                     is_b64 = (ch.get("base64") == "true")
                     raw = ch.text or ""
                     if is_b64:
@@ -92,7 +110,25 @@ def load_vfs_from_xml(xml_path: Path | None):
                 return {"type": "file", "binary": True, "data": data}
             return {"type": "file", "binary": False, "data": raw}
         else:
-            return _vfs_dir()
+            # контейнер (например, <vfs>): соберём только dir/file-потомков
+            node = _vfs_dir()
+            for ch in elem:
+                if ch.tag == "dir":
+                    name = ch.get("name") or ""
+                    node["children"][name] = build(ch)
+                elif ch.tag == "file":
+                    name = ch.get("name") or ""
+                    is_b64 = (ch.get("base64") == "true")
+                    raw = ch.text or ""
+                    if is_b64:
+                        try:
+                            data = base64.b64decode(raw.encode("utf-8"))
+                        except Exception:
+                            data = b""
+                        node["children"][name] = {"type": "file", "binary": True, "data": data}
+                    else:
+                        node["children"][name] = {"type": "file", "binary": False, "data": raw}
+            return node
 
     vroot = build(root)
     if vroot.get("type") != "dir":
@@ -118,11 +154,14 @@ def vfs_walk(vroot, parts):
             return None
     return node
 
+# -----------------
+# app
+# -----------------
 
 class App(tk.Tk):
     def __init__(self, vfs_xml_path, log_path, script_path):
         super().__init__()
-        self.title("Console Simulator — Stage 3")
+        self.title("Console Simulator — Stages 3/4/5")
         self.geometry("800x520")
 
         self.text = tk.Text(self)
@@ -145,11 +184,13 @@ class App(tk.Tk):
 
         self.prompt_index = None
 
+        # bindings
         self.text.bind("<Return>", self.on_enter)
         self.text.bind("<BackSpace>", self.on_backspace)
         self.text.bind("<Left>", self.on_left)
         self.text.bind("<Button-1>", lambda e: self.after(1, self.fix_cursor))
 
+        # debug banner
         self.print_line("# Debug parameters")
         self.print_line(f"VFS XML    : {str(self.vfs_path) if self.vfs_path else '(none)'}")
         self.print_line(f"Log (XML)  : {str(self.log_file) if self.log_file else '(none)'}")
@@ -236,9 +277,24 @@ class App(tk.Tk):
         if cmd == "cat":
             self.cmd_cat(args)
             return
+        # Stage 4
+        if cmd == "uniq":
+            self.cmd_uniq(args)
+            return
+        if cmd == "tree":
+            self.cmd_tree(args)
+            return
+        # Stage 5
+        if cmd == "mkdir":
+            self.cmd_mkdir(args)
+            return
+        if cmd == "rm":
+            self.cmd_rm(args)
+            return
+
         self.print_line(f"Unknown cmd '{cmd}'")
 
-
+    # Stage 3: cd, ls, cat (как были)
     def cmd_cd(self, args):
         if len(args) > 1:
             self.print_line("Err: Illegal args for 'cd' (1 required)")
@@ -291,6 +347,147 @@ class App(tk.Tk):
         else:
             self.print_line(child.get("data") or "")
 
+    # Stage 4: uniq, tree
+    def cmd_uniq(self, args):
+        if len(args) != 1:
+            self.print_line("Usage: uniq <file>")
+            return
+        dir_node = vfs_walk(self.vroot, path_parts(self.cwd))
+        if not dir_node or dir_node.get("type") != "dir":
+            self.print_line("Err: current directory is invalid")
+            return
+        file_node = dir_node["children"].get(args[0])
+        if not file_node or file_node.get("type") != "file":
+            self.print_line("Err: no such file: " + args[0])
+            return
+        if file_node.get("binary"):
+            self.print_line("Err: uniq supports only text files")
+            return
+
+        text = (file_node.get("data") or "")
+        lines = text.splitlines()
+        seen = set()
+        out_any = False
+        for ln in lines:
+            if ln not in seen:
+                seen.add(ln)
+                self.print_line(ln)
+                out_any = True
+        if not out_any:
+            self.print_line("(empty)")
+
+    def cmd_tree(self, args):
+        if len(args) > 1:
+            self.print_line("Usage: tree [name]")
+            return
+        base_dir = vfs_walk(self.vroot, path_parts(self.cwd))
+        if not base_dir or base_dir.get("type") != "dir":
+            self.print_line("Err: current directory is invalid")
+            return
+        node = base_dir
+        node_label = "."
+        if len(args) == 1:
+            got = base_dir["children"].get(args[0])
+            if not got:
+                self.print_line("Err: no such file or directory: " + args[0])
+                return
+            node = got
+            node_label = args[0]
+
+        def list_children_sorted(d):
+            dirs, files = [], []
+            for name, ch in d.get("children", {}).items():
+                (dirs if ch.get("type") == "dir" else files).append(name)
+            return sorted(dirs), sorted(files)
+
+        def recurse(n, label, prefix=""):
+            if label:
+                self.print_line(prefix + label + ("/" if n.get("type") == "dir" else ""))
+            if n.get("type") != "dir":
+                return
+            dirs, files = list_children_sorted(n)
+            entries = [(d, True) for d in dirs] + [(f, False) for f in files]
+            last = len(entries) - 1
+            for i, (name, is_dir) in enumerate(entries):
+                child = n["children"][name]
+                connector = "└── " if i == last else "├── "
+                self.print_line(prefix + connector + name + ("/" if is_dir else ""))
+                if is_dir:
+                    recurse(child, "", prefix + ("    " if i == last else "│   "))
+
+        recurse(node, node_label, "")
+
+    # Stage 5: mkdir, rm  (все изменения только в памяти)
+    def cmd_mkdir(self, args):
+        """
+        mkdir <name>
+        Создаёт подкаталог в текущей директории VFS.
+        Ограничения: имя без '/', не пустое, не должно существовать.
+        """
+        if len(args) != 1:
+            self.print_line("Usage: mkdir <name>")
+            return
+        name = args[0]
+        if not name or "/" in name:
+            self.print_line("Err: invalid directory name")
+            return
+        dir_node = vfs_walk(self.vroot, path_parts(self.cwd))
+        if not dir_node or dir_node.get("type") != "dir":
+            self.print_line("Err: current directory is invalid")
+            return
+        if name in dir_node["children"]:
+            self.print_line("Err: already exists: " + name)
+            return
+        dir_node["children"][name] = _vfs_dir()
+        self.print_line(f"mkdir: created directory '{name}'")
+
+    def cmd_rm(self, args):
+        """
+        rm [-r] <name>
+        Удаляет файл или каталог в текущей директории.
+        Для непустых каталогов требуется -r.
+        """
+        if not args:
+            self.print_line("Usage: rm [-r] <name>")
+            return
+        recursive = False
+        if args[0] == "-r":
+            if len(args) != 2:
+                self.print_line("Usage: rm [-r] <name>")
+                return
+            recursive = True
+            name = args[1]
+        else:
+            if len(args) != 1:
+                self.print_line("Usage: rm [-r] <name>")
+                return
+            name = args[0]
+
+        dir_node = vfs_walk(self.vroot, path_parts(self.cwd))
+        if not dir_node or dir_node.get("type") != "dir":
+            self.print_line("Err: current directory is invalid")
+            return
+        node = dir_node["children"].get(name)
+        if not node:
+            self.print_line("Err: no such file or directory: " + name)
+            return
+
+        if node.get("type") == "file":
+            del dir_node["children"][name]
+            self.print_line(f"rm: removed '{name}'")
+            return
+
+        # directory
+        if node.get("type") == "dir":
+            if node["children"] and not recursive:
+                self.print_line("Err: is a directory: use rm -r")
+                return
+            # рекурсивное удаление — достаточно просто удалить ссылку из children
+            del dir_node["children"][name]
+            self.print_line(f"rm: removed directory '{name}'")
+            return
+
+    # script
     def run_script(self):
         try:
             text = self.script.read_text(encoding="utf-8")
@@ -316,9 +513,14 @@ class App(tk.Tk):
             self.print_line("[SCRIPT] Нет команд для выполнения")
         self.show_prompt()
 
+# -----------------
+# cli
+# -----------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Console simulator (Stage 3): in-memory VFS + Stage 2 features")
+    parser = argparse.ArgumentParser(
+        description="Console simulator (Stages 3/4/5): VFS in-memory + logging + script"
+    )
     parser.add_argument("--vfs", default=None, help="Path to VFS XML file")
     parser.add_argument("--log", default=None, help="Path to XML log file")
     parser.add_argument("--script", default=None, help="Path to startup script")
